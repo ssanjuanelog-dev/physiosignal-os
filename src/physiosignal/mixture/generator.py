@@ -8,7 +8,7 @@ import pandas as pd
 import logging
 from pathlib import Path
 from typing import Tuple, Dict, Any
-from ecg_in_emg.datasets.physio_generator import generate_realistic_mixture
+from physiosignal.datasets.physio_generator import generate_realistic_mixture
 
 logger = logging.getLogger(__name__)
 
