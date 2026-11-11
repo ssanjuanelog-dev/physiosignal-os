@@ -21,6 +21,7 @@ Drawing from professional audio restoration techniques, this pipeline implements
 2. **Spectral Isolation:** Low-pass filters (<25Hz) the extracted epochs to build a pure ECG spatial template, completely stripping out high-frequency EMG contamination.
 3. **Per-Beat Adaptive Scaling:** Calculates the exact amplitude ratio of *each individual beat* against the template, applying a dynamic gain to prevent over/under-subtraction artifacts.
 4. **Smooth Gated Subtraction:** Applies a Hann window mask to the subtraction, ensuring zero boundary discontinuities ("clicks") in the restored signal.
+- **Detección Ciega de Referencia (Blind Detection):** El algoritmo no asume un orden de canales fijo. Escanea automáticamente todos los canales en busca de la máxima energía en la banda del ECG (5-15 Hz), seleccionando la mejor referencia incluso en datos desordenados o con canales faltantes.
 
 ## 🏗️ Architecture
 - `src/ecg_in_emg/mixture/generator.py`: Deterministic, leakage-proof mixture generation with SHA-256 seeded provenance.

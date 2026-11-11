@@ -1,6 +1,6 @@
 """
 Event-Aligned Subspace Canceller.
-Production-ready implementation with empirically tuned defaults.
+Production-ready with AUTOMATIC reference channel detection for true Blind Source Separation.
 """
 import numpy as np
 import mne
@@ -11,20 +11,15 @@ from sklearn.base import BaseEstimator, TransformerMixin
 logger = logging.getLogger(__name__)
 
 class ECGSubspaceRemover(BaseEstimator, TransformerMixin):
-    def __init__(self, ref_channel_idx=0, window=(-0.15, 0.35), n_components=2, 
+    def __init__(self, ref_channel_idx='auto', window=(-0.15, 0.35), n_components=2, 
                  bandpass_freqs=(5.0, 15.0), peak_threshold=0.5, 
                  ecg_max_freq=25.0, subtraction_strength=1.5):
         """
         Parameters:
         -----------
-        ecg_max_freq : float (default 25.0)
-            Low-pass cutoff for ECG isolation. 25Hz captures QRS morphology 
-            while protecting high-frequency EMG (>30Hz).
-        
-        subtraction_strength : float (default 1.5)
-            Compensates for median-template amplitude underestimation. 
-            1.5 is the empirically tuned sweet spot for complete cancellation 
-            without over-subtraction artifacts.
+        ref_channel_idx : int or 'auto' (default 'auto')
+            If 'auto', the algorithm scans all channels and selects the one with 
+            the highest variance in the ECG band (5-15Hz) as the reference.
         """
         self.ref_channel_idx = ref_channel_idx
         self.window = window
@@ -39,19 +34,35 @@ class ECGSubspaceRemover(BaseEstimator, TransformerMixin):
         self.peak_indices_ = []
         self.sfreq_ = None
         self.template_max_amp_ = None
+        self.detected_ref_channel_ = None
 
     def fit(self, raw: mne.io.Raw, y=None):
         logger.info("Fitting ECG Subspace Remover...")
         self.sfreq_ = raw.info['sfreq']
         data = raw.get_data()
-        ref_signal = data[self.ref_channel_idx]
+        n_channels = data.shape[0]
         
         nyq = 0.5 * self.sfreq_
         low = self.bandpass_freqs[0] / nyq
         high = self.bandpass_freqs[1] / nyq
         b_det, a_det = butter(4, [low, high], btype='band')
-        filtered_ref = filtfilt(b_det, a_det, ref_signal)
         
+        # BLIND DETECTION: Find the channel with the most ECG energy
+        if self.ref_channel_idx == 'auto':
+            channel_variances = []
+            for ch in range(n_channels):
+                filtered_ch = filtfilt(b_det, a_det, data[ch])
+                channel_variances.append(np.var(filtered_ch))
+            
+            self.detected_ref_channel_ = int(np.argmax(channel_variances))
+            ref_signal = data[self.detected_ref_channel_]
+            logger.info(f"Auto-detected reference channel: {raw.ch_names[self.detected_ref_channel_]} (Index {self.detected_ref_channel_})")
+        else:
+            self.detected_ref_channel_ = self.ref_channel_idx
+            ref_signal = data[self.ref_channel_idx]
+            logger.info(f"Using user-specified reference channel: {raw.ch_names[self.detected_ref_channel_]}")
+        
+        filtered_ref = filtfilt(b_det, a_det, ref_signal)
         threshold = self.peak_threshold * np.std(filtered_ref)
         peaks, _ = find_peaks(filtered_ref, height=threshold, distance=int(0.6 * self.sfreq_))
         self.peak_indices_ = peaks
