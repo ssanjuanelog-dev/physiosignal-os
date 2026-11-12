@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+ENV/
+env/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Git
+.git/
+.gitignore
+
+# Resultados generados (se montan como volumen)
+results/mixtures/
+results/audit/
+results/reports/
+
+# Documentación y archivos innecesarios
+*.md
+docs/
+*.png
+*.jpg
+*.jpeg
+*.gif
+
+# Tests
+tests/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Otros
+.DS_Store
+*.log

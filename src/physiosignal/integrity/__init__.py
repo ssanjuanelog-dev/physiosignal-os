@@ -15,3 +15,4 @@ __all__ = [
     'MerkleTree',
     'Verifier', 'verify_file', 'verify_audit', 'verify_sig'
 ]
+from .report_generator import ClinicalReportGenerator
