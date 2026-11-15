@@ -306,6 +306,23 @@ async def get_report(analysis_id: str, db: Session = Depends(get_db)):
         created_at=analysis.created_at
     )
 
+
+@app.get("/api/v1/patients", response_model=List[PatientResponse])
+async def get_all_patients(db: Session = Depends(get_db)):
+    """Get all patients with their analysis count."""
+    patients = db.query(Patient).all()
+    
+    result = []
+    for p in patients:
+        total_analyses = db.query(Analysis).filter(Analysis.patient_hash == p.patient_hash).count()
+        result.append(PatientResponse(
+            patient_hash=p.patient_hash[:16] + "...",
+            created_at=p.created_at,
+            total_analyses=total_analyses
+        ))
+    
+    return result
+
 @app.get("/api/v1/patients/{patient_id}/analyses", response_model=List[AnalysisResponse])
 async def get_patient_analyses(patient_id: str, db: Session = Depends(get_db)):
     """Get all analyses for a specific patient."""

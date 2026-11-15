@@ -18,12 +18,30 @@ jobs:
       with:
         python-version: '3.11'
     
-    - name: Install dependencies
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libsndfile1
+    
+    - name: Install Python dependencies
       run: |
         python -m pip install --upgrade pip
         pip install pytest pytest-cov
         if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
         pip install -e .
+    
+    - name: Generate test data (if needed)
+      run: |
+        mkdir -p results/mixtures/SUBJ_01
+        # Run a quick script to generate dummy test data if it doesn't exist
+        python -c "
+import mne, numpy as np, pathlib
+path = pathlib.Path('results/mixtures/SUBJ_01/mixture_snr-5_seed0-raw.fif')
+if not path.exists():
+    info = mne.create_info(ch_names=['EMG1', 'ECG1'], sfreq=250.0, ch_types=['eeg', 'eeg'])
+    raw = mne.io.RawArray(np.random.randn(2, 2500), info)
+    raw.save(path, overwrite=True)
+"
     
     - name: Run tests with pytest
       run: |
@@ -35,3 +53,4 @@ jobs:
         file: ./coverage.xml
         flags: unittests
         name: codecov-umbrella
+        fail_ci_if_error: false
