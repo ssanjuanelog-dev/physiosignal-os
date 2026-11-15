@@ -13,3 +13,4 @@ python-multipart>=0.0.6
 # Testing
 pytest>=7.4.0
 pytest-cov>=4.1.0
+\n# Database\nsqlalchemy>=2.0.0\n

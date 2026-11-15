@@ -2,7 +2,9 @@
 PhysioSignal OS API
 FastAPI application with REST endpoints for signal processing.
 """
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, HTTPException, UploadFile, File, Depends, WebSocket, WebSocketDisconnect
+import asyncio
+import numpy as np
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -10,14 +12,16 @@ from typing import Optional, List, Dict, Any
 from pathlib import Path
 import uuid
 from datetime import datetime
+from sqlalchemy.orm import Session
 
 from ..integrity import get_audit_log, hash_array
 from ..integrity.report_generator import ClinicalReportGenerator
+from ..database import get_db, Patient, Analysis
 
 app = FastAPI(
     title="PhysioSignal OS API",
     description="State-of-the-art physiological signal processing platform",
-    version="0.1.0",
+    version="0.2.0",
     docs_url="/docs",
     redoc_url="/redoc"
 )
@@ -30,9 +34,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# In-memory storage for demo (replace with DB in production)
-analysis_results = {}
 
 # Request/Response models
 class AnalyzeRequest(BaseModel):
@@ -63,35 +64,46 @@ class ExamInfo(BaseModel):
     description: str
     algorithm_count: int
 
+class PatientResponse(BaseModel):
+    patient_hash: str
+    created_at: datetime
+    total_analyses: int
+
+class AnalysisResponse(BaseModel):
+    analysis_id: str
+    signal_type: str
+    exam_type: str
+    algorithm_id: str
+    metrics: Dict[str, Any]
+    status: str
+    created_at: datetime
+
 @app.get("/")
 async def root():
     """API root endpoint."""
     return {
         "name": "PhysioSignal OS API",
-        "version": "0.1.0",
+        "version": "0.2.0",
         "status": "operational",
         "docs": "/docs"
     }
 
 @app.get("/api/v1/signals", response_model=List[SignalInfo])
 async def get_signals():
-    """
-    List all available signal types.
-    """
-    from ..signals import EMGSignal, EEGSignal, ECGSignal
-    
+    """List all available signal types."""
     signals = [
         SignalInfo(id="emg", name="EMG", full_name="Electromyography", exam_count=2),
         SignalInfo(id="eeg", name="EEG", full_name="Electroencephalography", exam_count=2),
         SignalInfo(id="ecg", name="ECG", full_name="Electrocardiography", exam_count=2),
+        SignalInfo(id="psg", name="PSG", full_name="Polysomnography", exam_count=1),
+        SignalInfo(id="ppg", name="PPG", full_name="Photoplethysmography", exam_count=1),
+        SignalInfo(id="eda", name="EDA", full_name="Electrodermal Activity", exam_count=1),
     ]
     return signals
 
 @app.get("/api/v1/signals/{signal_type}/exams", response_model=List[ExamInfo])
 async def get_exams(signal_type: str):
-    """
-    List available exams for a specific signal type.
-    """
+    """List available exams for a specific signal type."""
     exams_db = {
         "emg": [
             ExamInfo(id="artifact-removal", name="ECG Artifact Removal", description="Remove cardiac artifacts", algorithm_count=2),
@@ -105,6 +117,15 @@ async def get_exams(signal_type: str):
             ExamInfo(id="morphology-analysis", name="Morphology Analysis", description="P-QRS-T analysis", algorithm_count=1),
             ExamInfo(id="hrv-analysis", name="HRV Analysis", description="Heart rate variability", algorithm_count=1),
         ],
+        "psg": [
+            ExamInfo(id="sleep-staging", name="Sleep Staging", description="Automatic sleep stage classification", algorithm_count=1),
+        ],
+        "eda": [
+            ExamInfo(id="stress-analysis", name="Stress Analysis", description="Tonic/phasic decomposition", algorithm_count=1),
+        ],
+        "ppg": [
+            ExamInfo(id="heart-rate", name="Heart Rate", description="Extract heart rate from PPG", algorithm_count=1),
+        ],
     }
     
     if signal_type not in exams_db:
@@ -113,16 +134,9 @@ async def get_exams(signal_type: str):
     return exams_db[signal_type]
 
 @app.post("/api/v1/analyze", response_model=AnalyzeResponse)
-async def analyze_signal(request: AnalyzeRequest):
-    """
-    Execute signal processing pipeline.
-    
-    This endpoint:
-    1. Loads or generates physiological data
-    2. Applies the selected algorithm
-    3. Generates cryptographic audit trail
-    4. Creates signed clinical report
-    """
+async def analyze_signal(request: AnalyzeRequest, db: Session = Depends(get_db)):
+    """Execute signal processing pipeline and store results in database."""
+    import hashlib
     analysis_id = str(uuid.uuid4())[:8]
     timestamp = datetime.now().isoformat()
     
@@ -132,6 +146,8 @@ async def analyze_signal(request: AnalyzeRequest):
         import numpy as np
         from ..algorithms.emg.ecg_subspace_remover import ECGSubspaceRemover
         from ..algorithms.ecg.hrv_analyzer import HRVAnalyzer
+        from ..algorithms.eeg.welch_psd import WelchPSDAnalyzer
+        from ..algorithms.eda.eda_analyzer import EDAAnalyzer
         
         # Load test data
         mixture_files = list(Path("results/mixtures/SUBJ_01").glob("mixture_snr-5_seed*-raw.fif"))
@@ -152,7 +168,6 @@ async def analyze_signal(request: AnalyzeRequest):
         
         # Process based on signal type
         if request.signal_type == "emg" and request.exam_type == "artifact-removal":
-            # Run ECG Subspace Canceller
             remover = ECGSubspaceRemover(
                 ref_channel_idx=request.parameters.get("ref_channel", "auto"),
                 ecg_max_freq=request.parameters.get("ecg_max_freq", 25.0),
@@ -160,15 +175,25 @@ async def analyze_signal(request: AnalyzeRequest):
             )
             raw_clean = remover.fit_transform(raw_mixture)
             
-            # Run HRV on cleaned signal
             hrv = HRVAnalyzer(sfreq=raw_clean.info['sfreq'])
             metrics = hrv.fit_transform(raw_clean)
             
         elif request.signal_type == "ecg" and request.exam_type == "hrv-analysis":
-            # Direct HRV analysis
             hrv = HRVAnalyzer(sfreq=raw_mixture.info['sfreq'])
             metrics = hrv.fit_transform(raw_mixture)
-            raw_clean = raw_mixture  # No cleaning needed
+            raw_clean = raw_mixture
+            
+        elif request.signal_type == "eeg" and request.exam_type == "spectral-analysis":
+            # Run Welch PSD Analysis
+            psd_analyzer = WelchPSDAnalyzer(sfreq=raw_mixture.info['sfreq'])
+            metrics = psd_analyzer.fit_transform(raw_mixture)
+            raw_clean = raw_mixture  # No cleaning needed for this demo
+            
+        elif request.signal_type == "eda" and request.exam_type == "stress-analysis":
+            # Run EDA Analysis
+            eda_analyzer = EDAAnalyzer(sfreq=raw_mixture.info['sfreq'])
+            metrics = eda_analyzer.fit_transform(raw_mixture)
+            raw_clean = raw_mixture
             
         else:
             # Default: return mock metrics for other combinations
@@ -204,12 +229,32 @@ async def analyze_signal(request: AnalyzeRequest):
         # Save audit
         audit.save()
         
-        # Store result
-        analysis_results[analysis_id] = {
-            "metrics": metrics,
-            "report_path": str(report_path),
-            "timestamp": timestamp
-        }
+        # Store in database
+        patient_hash = hashlib.sha256(request.patient_id.encode()).hexdigest()
+        
+        # Create or get patient
+        patient = db.query(Patient).filter(Patient.patient_hash == patient_hash).first()
+        if not patient:
+            patient = Patient(patient_hash=patient_hash)
+            db.add(patient)
+            db.commit()
+        
+        # Create analysis record
+        analysis = Analysis(
+            id=analysis_id,
+            patient_hash=patient_hash,
+            signal_type=request.signal_type,
+            exam_type=request.exam_type,
+            algorithm_id=request.algorithm_id,
+            parameters=request.parameters,
+            metrics=metrics,
+            input_hash=input_hash,
+            output_hash=output_hash,
+            report_path=str(report_path),
+            status="success"
+        )
+        db.add(analysis)
+        db.commit()
         
         return AnalyzeResponse(
             analysis_id=analysis_id,
@@ -222,17 +267,118 @@ async def analyze_signal(request: AnalyzeRequest):
         )
         
     except Exception as e:
+        # Log failed analysis
+        try:
+            failed_analysis = Analysis(
+                id=analysis_id,
+                patient_hash=hashlib.sha256(request.patient_id.encode()).hexdigest(),
+                signal_type=request.signal_type,
+                exam_type=request.exam_type,
+                algorithm_id=request.algorithm_id,
+                parameters=request.parameters,
+                metrics={"error": str(e)},
+                input_hash="",
+                output_hash="",
+                report_path="",
+                status="failed"
+            )
+            db.add(failed_analysis)
+            db.commit()
+        except:
+            pass
+        
         raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
 
-@app.get("/api/v1/reports/{analysis_id}")
-async def get_report(analysis_id: str):
-    """
-    Retrieve analysis report by ID.
-    """
-    if analysis_id not in analysis_results:
+@app.get("/api/v1/reports/{analysis_id}", response_model=AnalysisResponse)
+async def get_report(analysis_id: str, db: Session = Depends(get_db)):
+    """Retrieve analysis report by ID from database."""
+    analysis = db.query(Analysis).filter(Analysis.id == analysis_id).first()
+    if not analysis:
         raise HTTPException(status_code=404, detail="Analysis not found")
     
-    return analysis_results[analysis_id]
+    return AnalysisResponse(
+        analysis_id=analysis.id,
+        signal_type=analysis.signal_type,
+        exam_type=analysis.exam_type,
+        algorithm_id=analysis.algorithm_id,
+        metrics=analysis.metrics,
+        status=analysis.status,
+        created_at=analysis.created_at
+    )
+
+@app.get("/api/v1/patients/{patient_id}/analyses", response_model=List[AnalysisResponse])
+async def get_patient_analyses(patient_id: str, db: Session = Depends(get_db)):
+    """Get all analyses for a specific patient."""
+    import hashlib
+    patient_hash = hashlib.sha256(patient_id.encode()).hexdigest()
+    
+    analyses = db.query(Analysis).filter(Analysis.patient_hash == patient_hash).all()
+    
+    return [
+        AnalysisResponse(
+            analysis_id=a.id,
+            signal_type=a.signal_type,
+            exam_type=a.exam_type,
+            algorithm_id=a.algorithm_id,
+            metrics=a.metrics,
+            status=a.status,
+            created_at=a.created_at
+        )
+        for a in analyses
+    ]
+
+
+@app.websocket("/ws/stream")
+async def websocket_stream(websocket: WebSocket):
+    """
+    WebSocket endpoint for real-time signal streaming.
+    Simulates live physiological data (ECG-like waveform) for demo purposes.
+    In production, this would connect to actual hardware (OpenBCI, etc.)
+    """
+    await websocket.accept()
+    print("🔌 WebSocket client connected")
+    
+    try:
+        t = 0
+        while True:
+            # Generate realistic ECG-like signal with noise
+            # P wave + QRS complex + T wave simulation
+            phase = (t * 2 * np.pi * 1.2) % (2 * np.pi)  # 1.2 Hz heart rate
+            
+            # Baseline + P wave
+            signal = 0.1 * np.sin(phase * 0.5)
+            
+            # QRS complex (sharp peak around phase = pi)
+            if abs(phase - np.pi) < 0.3:
+                signal += 1.5 * np.exp(-((phase - np.pi) ** 2) / 0.01)
+                signal -= 0.3 * np.exp(-((phase - np.pi - 0.1) ** 2) / 0.005)
+            
+            # T wave
+            if 0.3 < (phase - np.pi) < 1.0:
+                signal += 0.3 * np.sin((phase - np.pi - 0.3) * np.pi / 0.7)
+            
+            # Add realistic noise
+            signal += np.random.normal(0, 0.05)
+            
+            # Send data as JSON
+            await websocket.send_json({
+                "timestamp": t,
+                "value": float(signal),
+                "signal_type": "ecg_simulation",
+                "unit": "mV"
+            })
+            
+            t += 0.01  # 100 Hz sampling rate
+            await asyncio.sleep(0.01)
+            
+    except WebSocketDisconnect:
+        print("🔌 WebSocket client disconnected")
+    except Exception as e:
+        print(f"❌ WebSocket error: {e}")
+        try:
+            await websocket.close()
+        except:
+            pass
 
 @app.get("/api/v1/health")
 async def health_check():
@@ -240,5 +386,6 @@ async def health_check():
     return {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
-        "version": "0.1.0"
+        "version": "0.2.0",
+        "database": "SQLite"
     }
